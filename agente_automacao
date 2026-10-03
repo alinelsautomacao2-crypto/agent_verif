@@ -1,0 +1,126 @@
+"""
+Agente de Análise de Automação
+------------------------------
+Lê um log de tarefas (CSV/Excel), calcula onde o tempo é gasto e usa o Claude
+para dizer o que dá para automatizar e COMO fazer.
+
+Uso:
+    pip install -r requirements.txt
+    cp .env.example .env   # e preencha a chave
+    python agente_automacao.py data/tarefas_exemplo.csv --top 10
+
+Colunas obrigatórias do log:
+    plataforma, tarefa, duracao_min, vezes_por_semana
+Colunas opcionais:
+    descricao (detalhe do passo a passo), ferramentas (ex.: Excel, Power BI)
+"""
+import argparse
+import json
+import os
+
+import anthropic
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()  # carrega ANTHROPIC_API_KEY do arquivo .env
+
+MODELO = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
+OBRIGATORIAS = {"plataforma", "tarefa", "duracao_min", "vezes_por_semana"}
+
+SYSTEM_PROMPT = """Você é um consultor sênior de automação e dados.
+Receberá uma lista de tarefas manuais (plataforma, duração, frequência).
+Para CADA tarefa, avalie se é automatizável e proponha a solução mais simples
+que funcione. Considere: Python (pandas, requests, selenium/playwright),
+Power Automate, Power Query/Power BI (atualização agendada), SQL/stored
+procedures, APIs das plataformas, agendadores (cron, Task Scheduler, Airflow).
+
+Responda SOMENTE com JSON válido (sem markdown), no formato:
+{"analises": [{
+  "tarefa": str,
+  "potencial": "alto" | "medio" | "baixo",
+  "abordagem": str,            // ferramenta/técnica recomendada
+  "como_fazer": [str, ...],    // passos práticos, 3 a 6 itens
+  "esforco_horas": number,     // estimativa para implementar
+  "riscos": str,               // limitações, dependências, validações
+  "prioridade": int            // 1 = fazer primeiro
+}]}"""
+
+
+def carregar_log(caminho: str) -> pd.DataFrame:
+    if caminho.lower().endswith((".xlsx", ".xls")):
+        df = pd.read_excel(caminho)
+    else:
+        df = pd.read_csv(caminho)
+    faltando = OBRIGATORIAS - set(df.columns)
+    if faltando:
+        raise ValueError(f"Colunas faltando no log: {sorted(faltando)}")
+    return df
+
+
+def resumir(df: pd.DataFrame, top: int) -> pd.DataFrame:
+    """Soma o tempo mensal por tarefa e mantém as mais custosas."""
+    df = df.copy()
+    df["horas_mes"] = df["duracao_min"] * df["vezes_por_semana"] * 4.33 / 60
+    return df.sort_values("horas_mes", ascending=False).head(top).reset_index(drop=True)
+
+
+def analisar_com_claude(tarefas: pd.DataFrame) -> list[dict]:
+    cliente = anthropic.Anthropic()  # usa ANTHROPIC_API_KEY
+    payload = tarefas.fillna("").to_dict(orient="records")
+    resposta = cliente.messages.create(
+        model=MODELO,
+        max_tokens=4000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+    )
+    texto = "".join(b.text for b in resposta.content if b.type == "text")
+    texto = texto.replace("```json", "").replace("```", "").strip()
+    return json.loads(texto)["analises"]
+
+
+def montar_relatorio(tarefas: pd.DataFrame, analises: list[dict]) -> pd.DataFrame:
+    ia = pd.DataFrame(analises)
+    ia["como_fazer"] = ia["como_fazer"].apply(lambda p: "\n".join(f"{i+1}. {s}" for i, s in enumerate(p)))
+    rel = tarefas.merge(ia, on="tarefa", how="left")
+    # Economia estimada: assume 80% do tempo recuperado nas de potencial alto, 50% nas médias
+    fator = rel["potencial"].map({"alto": 0.8, "medio": 0.5, "baixo": 0.1}).fillna(0)
+    rel["horas_economizadas_mes"] = (rel["horas_mes"] * fator).round(1)
+    rel["payback_meses"] = (rel["esforco_horas"] / rel["horas_economizadas_mes"]).round(1)
+    return rel.sort_values("prioridade")
+
+
+def salvar(rel: pd.DataFrame, base: str = "output/relatorio_automacao") -> None:
+    os.makedirs(os.path.dirname(base), exist_ok=True)
+    rel.to_excel(f"{base}.xlsx", index=False)
+    linhas = ["# Relatório de Automação\n"]
+    total = rel["horas_economizadas_mes"].sum()
+    linhas.append(f"**Economia potencial: ~{total:.0f} h/mês**\n")
+    for _, r in rel.iterrows():
+        linhas += [
+            f"## {int(r['prioridade'])}. {r['tarefa']} ({r['plataforma']})",
+            f"- Potencial: **{r['potencial']}** | Esforço: {r['esforco_horas']} h | "
+            f"Economia: {r['horas_economizadas_mes']} h/mês",
+            f"- Abordagem: {r['abordagem']}",
+            f"- Riscos: {r['riscos']}",
+            "\n**Como fazer:**\n" + r["como_fazer"] + "\n",
+        ]
+    with open(f"{base}.md", "w", encoding="utf-8") as f:
+        f.write("\n".join(linhas))
+    print(f"Gerado: {base}.xlsx e {base}.md")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Agente de análise de automação")
+    ap.add_argument("arquivo", help="CSV ou Excel com o log de tarefas")
+    ap.add_argument("--top", type=int, default=10, help="Nº de tarefas mais custosas a analisar")
+    args = ap.parse_args()
+
+    df = carregar_log(args.arquivo)
+    tarefas = resumir(df, args.top)
+    print(f"Analisando {len(tarefas)} tarefas com {MODELO}...")
+    analises = analisar_com_claude(tarefas)
+    salvar(montar_relatorio(tarefas, analises))
+
+
+if __name__ == "__main__":
+    main()
