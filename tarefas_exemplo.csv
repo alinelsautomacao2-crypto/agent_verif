@@ -1,0 +1,6 @@
+plataforma,tarefa,duracao_min,vezes_por_semana,descricao,ferramentas
+E-commerce,Exportar pedidos do dia e colar na planilha,25,5,Baixa CSV do painel e cola no Excel de logística,Excel
+ERP,Conferir estoque vs. planejamento de produção,40,3,Compara duas planilhas manualmente,Excel
+Power BI,Atualizar dashboard e enviar PDF por e-mail,20,5,Atualiza manualmente e exporta,Power BI; Outlook
+Compras,Consolidar cotações de fornecedores,60,2,Copia dados de vários e-mails,Outlook; Excel
+Logística,Rastrear status de entregas nas transportadoras,30,5,Acessa site de cada transportadora,Navegador
